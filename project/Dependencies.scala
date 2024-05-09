@@ -1,5 +1,11 @@
 import sbt._
 
 object Dependencies {
-  lazy val munit = "org.scalameta" %% "munit" % "0.7.29"
+  object Akka{
+    val akkaVer = "2.9.0"
+
+    val streamTyped = "com.typesafe.akka" %% "akka-stream-typed" % akkaVer
+
+    val All: Seq[ModuleID] = Seq(streamTyped)
+  }
 }

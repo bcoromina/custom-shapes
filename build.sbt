@@ -8,7 +8,10 @@ lazy val root = (project in file("."))
   .settings(
     commonSettings,
     name := "custom-shapes",
-    libraryDependencies ++= Dependencies.Akka.All
+    libraryDependencies ++=
+      Dependencies.Akka.All
+        ++ Dependencies.ScalaTest.All
+        ++ Dependencies.Logging.All
   )
 
 

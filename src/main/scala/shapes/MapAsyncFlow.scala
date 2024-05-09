@@ -1,65 +1,92 @@
 package shapes
 
+import akka.stream.ActorAttributes.SupervisionStrategy
 import akka.stream.stage.{GraphStage, GraphStageLogic, InHandler, OutHandler}
-import akka.stream.{Attributes, FlowShape, Inlet, Outlet}
+import akka.stream._
 
-import scala.concurrent.Future
+import scala.collection.mutable
+import scala.concurrent.{ExecutionContext, Future}
+import scala.util.control.NonFatal
+import scala.util.{Failure, Success, Try}
 
-class MapAsyncFlow[A, B](parallelism: Int, f: A => Future[B]) extends GraphStage[FlowShape[A, B]] {
+class LimitedQueue[A](maxSize: Int) extends mutable.Queue[A] {
+  override def enqueue(elem: A): this.type = {
+    if (length >= maxSize) dequeue()
+    enqueue(elem);
+    this
+  }
+  def used: Int = size
+}
 
-  val in: Inlet[A] = Inlet("MapAsyncFlow.in")
-  val out: Outlet[B] = Outlet("MapAsyncFlow.out")
+case class MapAsyncUnordered[In, Out](parallelism: Int, f: In => Future[Out])
+  extends GraphStage[FlowShape[In, Out]] {
 
-  override val shape: FlowShape[A, B] = FlowShape.of(in, out)
+  private val in = Inlet[In]("MapAsyncUnordered.in")
+  private val out = Outlet[Out]("MapAsyncUnordered.out")
 
-  override def createLogic(inheritedAttributes: Attributes): GraphStageLogic = new GraphStageLogic(shape) {
+  override val shape = FlowShape(in, out)
 
-    private var inFlight = 0
+  override def createLogic(inheritedAttributes: Attributes): GraphStageLogic =
+    new GraphStageLogic(shape) with InHandler with OutHandler {
+      override def toString = s"MapAsyncUnordered.Logic(inFlight=$inFlight, buffer=$buffer)"
 
-    // Called when an element is available at the input port
-    setHandler(in, new InHandler {
-      override def onPush(): Unit = {
-        val elem = grab(in)
-        val future = f(elem)
+      lazy val decider =
+        inheritedAttributes.mandatoryAttribute[SupervisionStrategy].decider
 
-        // Increment the inFlight counter
-        inFlight += 1
+      private var inFlight = 0
+      private var buffer: LimitedQueue[Out] = _
+      private val invokeFutureCB: Try[Out] => Unit = getAsyncCallback(futureCompleted).invoke
 
-        future.onComplete { result =>
-          // Decrement the inFlight counter
-          inFlight -= 1
-          if (isAvailable(out)) {
-            pushElementIfAvailable()
-          }
-        }(materializer.executionContext)
+      private[this] def todo: Int = inFlight + buffer.used
 
-        // Suspend the port until we have capacity
-        if (inFlight < parallelism) {
-          pull(in)
+      override def preStart(): Unit = buffer = new LimitedQueue[Out](parallelism)
+
+      def futureCompleted(result: Try[Out]): Unit = {
+        def isCompleted = isClosed(in) && todo == 0
+        inFlight -= 1
+        result match {
+          case Success(elem) if elem != null =>
+            if (isAvailable(out)) {
+              if (!hasBeenPulled(in)) tryPull(in)
+              push(out, elem)
+              if (isCompleted) completeStage()
+            } else buffer.enqueue(elem)
+          case Success(_) =>
+            if (isCompleted) completeStage()
+            else if (!hasBeenPulled(in)) tryPull(in)
+          case Failure(ex) =>
+            if (decider(ex) == Supervision.Stop) failStage(ex)
+            else if (isCompleted) completeStage()
+            else if (!hasBeenPulled(in)) tryPull(in)
         }
+      }
+
+      override def onPush(): Unit = {
+        try {
+          val future = f(grab(in))
+          inFlight += 1
+          future.value match {
+            case None    => future.onComplete(invokeFutureCB)(ExecutionContext.parasitic)
+            case Some(v) => futureCompleted(v)
+          }
+        } catch {
+          case NonFatal(ex) => if (decider(ex) == Supervision.Stop) failStage(ex)
+        }
+        if (todo < parallelism && !hasBeenPulled(in)) tryPull(in)
       }
 
       override def onUpstreamFinish(): Unit = {
-        if (inFlight == 0) {
-          completeStage()
-        }
+        if (todo == 0) completeStage()
       }
-    })
 
-    // Called when downstream requests an element
-    setHandler(out, new OutHandler {
       override def onPull(): Unit = {
-        pushElementIfAvailable()
-      }
-    })
+        if (buffer.nonEmpty) push(out, buffer.dequeue())
 
-    private def pushElementIfAvailable(): Unit = {
-      if (inFlight == 0 && isClosed(in)) {
-        // If there are no more in-flight elements and the input port is closed, complete the output port
-        complete(out)
-      } else if (inFlight < parallelism && !hasBeenPulled(in)) {
-        pull(in)
+        val leftTodo = todo
+        if (isClosed(in) && leftTodo == 0) completeStage()
+        else if (leftTodo < parallelism && !hasBeenPulled(in)) tryPull(in)
       }
+
+      setHandlers(in, out, this)
     }
-  }
 }

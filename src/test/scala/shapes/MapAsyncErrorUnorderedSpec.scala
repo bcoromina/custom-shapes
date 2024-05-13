@@ -34,7 +34,7 @@ class MapAsyncErrorUnorderedSpec extends ScalaTestWithActorTestKit() with AnyFla
     )
   }
 
-  it should "outputs " in {
+  it should "outputs errors in different port" in {
 
     def testFunction(i : Int): Future[String] =
       if(i % 2 == 0)

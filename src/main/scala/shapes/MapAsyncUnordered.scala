@@ -1,22 +1,15 @@
 package shapes
 
 import akka.stream.ActorAttributes.SupervisionStrategy
-import akka.stream.stage.{GraphStage, GraphStageLogic, InHandler, OutHandler}
 import akka.stream._
+import akka.stream.stage.{GraphStage, GraphStageLogic, InHandler, OutHandler}
+import shapes.util.LimitedQueue
 
-import scala.collection.mutable
 import scala.concurrent.{ExecutionContext, Future}
 import scala.util.control.NonFatal
 import scala.util.{Failure, Success, Try}
 
-class LimitedQueue[A](maxSize: Int) extends mutable.Queue[A] {
-  override def enqueue(elem: A): this.type = {
-    if (length >= maxSize) dequeue()
-    enqueue(elem);
-    this
-  }
-  def used: Int = size
-}
+
 
 case class MapAsyncUnordered[In, Out](parallelism: Int, f: In => Future[Out])
   extends GraphStage[FlowShape[In, Out]] {
